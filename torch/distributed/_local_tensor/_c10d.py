@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 import torch
 from torch._C import ScriptObject
-from torch._C._distributed_c10d import FakeWork
+from torch._C._distributed_c10d import CallbackWork, FakeWork
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.distributed_c10d import (
     _get_default_group,
@@ -765,10 +765,39 @@ def _local_send(
     # "send(Tensor[] tensors, __torch__.torch.classes.c10d.ProcessGroup process_group, "
     # "int dst, int tag) -> __torch__.torch.classes.c10d.Work";
 
-    raise NotImplementedError(
-        "LocalTensor does not support MPMD operations like send. "
-        "Use SPMD collective operations instead."
-    )
+    from . import LocalRunnerMode, LocalTensor
+
+    assert len(tensors) == 1
+    tensor = tensors[0]
+
+    assert isinstance(tensor, LocalTensor), "Input tensor must be a Tensor"
+    src = int(tensor.__rank__)
+
+    LocalRunnerMode.current().signal_send(src, dst, tensor._local_tensors[src])
+
+    work = FakeWork()
+    work_so = Work.boxed(work)
+    return work_so
+
+
+# class RecvWork(FakeWork):
+#     def __init__(self, recv: Callable[[], None]):
+#         super().__init__()
+#         self._done = False
+#         self._recv = recv
+
+#     def is_completed(self) -> bool:
+#         return self._done
+
+#     def is_success(self):
+#         return True
+
+#     def wait(self, timeout=None):
+#         if not self._done:
+#             breakpoint()
+#             self._recv()
+#             self._done = True
+#         return self
 
 
 def _local_recv_(
@@ -779,11 +808,25 @@ def _local_recv_(
 ) -> ScriptObject:
     # "recv_(Tensor[] tensors, __torch__.torch.classes.c10d.ProcessGroup process_group, "
     # "int src, int tag) -> __torch__.torch.classes.c10d.Work";
+    from . import LocalRunnerMode, LocalTensor
 
-    raise NotImplementedError(
-        "LocalTensor does not support MPMD operations like recv. "
-        "Use SPMD collective operations instead."
-    )
+    assert len(tensors) == 1
+    tensor = tensors[0]
+
+    assert isinstance(tensor, LocalTensor), "Input tensor must be a Tensor"
+    dst = int(tensor.__rank__)
+
+    def _recv_and_store() -> None:
+        def _wait_and_store(obj: object) -> None:
+            assert isinstance(obj, torch.Tensor), "Expected to receive a Tensor"
+            assert isinstance(tensor, LocalTensor), "Input tensor must be a Tensor"
+            tensor._local_tensors[dst] = obj
+
+        LocalRunnerMode.current().wait_recv(src, dst, _wait_and_store)
+
+    work = CallbackWork(_recv_and_store)
+    work_so = Work.boxed(work)
+    return work_so
 
 
 def _local_recv_any_source_(
@@ -792,7 +835,4 @@ def _local_recv_any_source_(
     # "recv_any_source_(Tensor[] tensors, __torch__.torch.classes.c10d.ProcessGroup process_group, "
     # "int tag) -> __torch__.torch.classes.c10d.Work";
 
-    raise NotImplementedError(
-        "LocalTensor does not support MPMD operations like recv_any_source. "
-        "Use SPMD collective operations instead."
-    )
+    return _local_recv_(tensors, process_group_so, -1, tag)
